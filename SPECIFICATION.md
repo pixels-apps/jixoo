@@ -2,6 +2,8 @@
 
 This document provides a comprehensive, exhaustive specification of the Divoom Pixoo 64 local network HTTP API protocol, derived from network captures and reverse engineering of the official Divoom Android client application (`com.divoom.Divoom`).
 
+The **Pixoo-64 II** shares the same command vocabulary but is served on another endpoint, with another response envelope and its own behaviors: see [§10](#10-pixoo-64-ii-observed-compatibility).
+
 ---
 
 ## 1. Overview & Transport Layer
@@ -16,6 +18,7 @@ The Divoom Pixoo 64 communicates over local Wi-Fi via an embedded HTTP server ru
   * Standard REST control: `http://<DEVICE_IP>:80/post`
   * Divoom Mobile App Local API: `http://<DEVICE_IP>:9000/divoom_api`
   * Multipart binary upload endpoint: `http://<DEVICE_IP>:9000/upload`
+  * On the **Pixoo-64 II**, port 80 is closed: the API is only served on `http://<DEVICE_IP>:9000/divoom_api` (§10.1).
 * **Content-Type:** `application/json; charset=utf-8` (or `multipart/form-data` for port 9000 uploads)
 
 > [!IMPORTANT]
@@ -43,6 +46,8 @@ If `error_code` is non-zero, the command failed or contained invalid parameters:
   "error_code": 1
 }
 ```
+
+The Pixoo-64 II replies with `ReturnCode` / `ReturnMessage` instead, plus device fields (`DeviceId`, `PacketFlag`…), and reports unknown commands as `{"ReturnCode": 1, "ReturnMessage": "Only accept JSON parameters"}` (§10.1).
 
 ---
 
@@ -773,12 +778,17 @@ The Pixoo 64 can be discovered on a local area network using two primary methods
 * **Mechanism:** Read the system ARP table (e.g. `arp -a`), extract active IP addresses on the local subnet, and issue a lightweight HTTP POST (`Channel/SetIndex`) probe to port `80` with a short connection timeout (~400ms).
 * *Result:* Validated Pixoo 64 devices will respond with `{"error_code": 0}`.
 
+### 3. Model Detection (Pixoo 64 vs Pixoo-64 II)
+* The Pixoo-64 II answers neither the UDP probes nor on port 80, and announces no mDNS service. It is found by the ARP/subnet probe on `:9000/divoom_api`.
+* **Mechanism (Jixoo):** send `{"Command": "Channel/GetIndex"}` (a harmless read) to `:80/post`, then to `:9000/divoom_api` (or to both paths on an explicit port), and recognize the model by its envelope: `error_code` for the Pixoo 64, `ReturnCode` for the Pixoo-64 II. The Pixoo-64 II reply also carries its `DeviceId`.
+
 ---
 
 ## 6. Device Quirks & Execution Behaviors
 
 1. **HTTP GIF Expiry & State Reversion:**
    When an HTTP animation is uploaded via `Draw/SendHttpGif`, the display switches to the HTTP buffer. Once the total duration of the animation frames expires (e.g., a single frame with a `PicSpeed` of 1000ms), the device **automatically reverts** to its previously active channel (such as Cloud Gallery or Clock). To keep an HTTP display static, send frames with long frame delays (e.g., `60000` ms).
+   *The Pixoo-64 II behaves the other way round:* the last image stays on screen, and long durations queue successive images (§10.3). Use a short `PicSpeed` (~1000 ms) for still images there.
 
 2. **Text Overlay Interaction with Channel Switches:**
    Sending `Channel/SetIndex` cancels the active HTTP GIF buffer and wipes active native HTTP text layers. Furthermore, client libraries that automatically issue `Channel/SetIndex` when sending text will interrupt any currently playing HTTP background animation.
@@ -813,6 +823,7 @@ The Pixoo 64 can be discovered on a local area network using two primary methods
 
 9. **Direct Remote GIF Playback Crash Risk:**
    Directing the ESP32 to fetch remote GIF URLs via `Device/PlayTFGif` frequently crashes the firmware due to limited RAM when decoding large frames (e.g. 1400x896) or handling HTTPS certificate validation. Client-side downloading, scaling to 64x64, and streaming via `Draw/SendHttpGif` avoids these firmware panics completely.
+   On the Pixoo-64 II, `Device/PlayTFGif` downloads the URL but never displays it (§10.2).
 
 ---
 
@@ -1004,7 +1015,7 @@ Observed on one **Pixoo-64 II** on 2026-10-25. Every write was checked on the ph
 | `getAlarms` | `Device/GetAlarm` | ⚠️ `ReturnCode 0`, no `AlarmList`, even right after `Device/SetAlarm`. `Tools/GetAlarm` is unknown. |
 | `setAlarm` / `deleteAlarm` | `Device/SetAlarm` / `Alarm/Del` | ⚠️ Acknowledged, but could not be checked (no read-back; the test alarm was disabled). `Device/DelAlarm` is unknown. |
 | `setMemorial` / `deleteMemorial` | `Memorial/Set` / `Memorial/Del` | ❌ `Memorial/Set` and `Memorial/Get` are unknown. `Memorial/Del` got no HTTP reply, and the device left the network right after (the cause is unconfirmed). `Tools/SetMemorialDay` and `Tools/DelMemorialDay` (§4.11.7) are unknown too. |
-| — | `Channel/SetConfig` | ✅ Not used by Jixoo. It writes `ClockTime`, `GalleryTime`, `SingleGalleyTime` and `GalleryShowTimeFlag`, which then persist. `ChannelIndex` is not kept. |
+| — | `Channel/SetConfig` | ⚠️ Not used by Jixoo. It writes `ClockTime`, `GalleryTime`, `SingleGalleyTime` and `GalleryShowTimeFlag`, which read back right away but were found reset to `0` about an hour later. `ChannelIndex` is not kept. |
 
 Command names differ between this specification and Jixoo's code (`Tools/SetTomato` versus `Tomato/Set`, `Tools/*Alarm` versus `Device/*Alarm`, `Tools/SetMemorialDay` versus `Memorial/Set`). On the Pixoo-64 II, only the names in Jixoo's code are recognized, and only for alarms (`Device/SetAlarm`, `Device/GetAlarm`, `Alarm/Del`).
 
@@ -1015,3 +1026,12 @@ Command names differ between this specification and Jixoo's code (`Tools/SetToma
 * **Still images:** each frame plays for `PicSpeed` ms before the next upload is shown. A long `PicSpeed` (60 000 ms, the value `sendColor` uses) **queues** successive still images, which then appear minutes late. With a short `PicSpeed` (≤ 2 000 ms), each image replaces the previous one right away, and **the last image stays on screen** after its duration. The device does not return to the previous channel.
 * `Channel/GetIndex` keeps reporting the underlying channel (for example `2`) while an HTTP image or animation is displayed.
 * Brightness was once read back at `30` without any brightness command having been sent. This was not reproduced, and the cause is unknown.
+
+### 10.4. How Jixoo Handles the Pixoo-64 II
+
+* **Model selection:** `PixooModel.PIXOO_64_II` (`PixooClient.builder().model(...)`, CLI `--model pixoo64-ii` or `PIXOO_MODEL`). Without a model, the client detects it on its first command (§5.3).
+* **Unsupported commands** throw `UnsupportedCommandException` (with the command name). This covers unknown commands (`ReturnCode 1`), reads that return no data, and commands rejected before being sent because the device acknowledges them without honoring them: `Channel/SetStartupChannel` (the value reverts) and `Memorial/Del` (the device stopped answering after it).
+* **Still images** (one-frame animations) are sent with `PicSpeed` 1000 ms, whatever the requested duration, so that they never queue. Multi-frame animations keep their frame durations.
+* **Remote GIF URLs** (`sendRemoteGifUrl`, CLI `gif --direct`) are downloaded, decoded and streamed by the client.
+* **Pacing:** for both models, requests are sent one at a time and at least 30 ms apart. On the Pixoo-64 II, the device itself sets the pace of frame uploads (~1.5 s each), and the client logs the expected upload time of an animation.
+
