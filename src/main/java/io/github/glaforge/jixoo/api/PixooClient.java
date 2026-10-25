@@ -80,6 +80,15 @@ public interface PixooClient extends AutoCloseable {
     }
 
     /**
+     * Gets the device model this client talks to.
+     *
+     * @return the device model
+     */
+    default PixooModel model() {
+        return PixooModel.PIXOO_64;
+    }
+
+    /**
      * Executes a raw command against the device.
      *
      * @param command the PixooCommand to execute
@@ -999,7 +1008,8 @@ public interface PixooClient extends AutoCloseable {
      */
     class Builder {
         private String ipAddress;
-        private int port = 80;
+        private PixooModel model = PixooModel.PIXOO_64;
+        private Integer port;
         private Duration connectTimeout = Duration.ofSeconds(5);
         private Duration requestTimeout = Duration.ofSeconds(5);
         private boolean autoSwitchToCustomChannel = false;
@@ -1019,7 +1029,19 @@ public interface PixooClient extends AutoCloseable {
         }
 
         /**
-         * Sets the target device port (default is 80).
+         * Sets the target device model (default is {@link PixooModel#PIXOO_64}),
+         * which selects the API path, the response envelope and the default port.
+         *
+         * @param model the device model
+         * @return this Builder
+         */
+        public Builder model(PixooModel model) {
+            this.model = model;
+            return this;
+        }
+
+        /**
+         * Sets the target device port (default is the model's port: 80 for the Pixoo 64, 9000 for the Pixoo-64 II).
          *
          * @param port the HTTP port
          * @return this Builder
@@ -1071,7 +1093,11 @@ public interface PixooClient extends AutoCloseable {
             if (ipAddress == null || ipAddress.isBlank()) {
                 throw new IllegalArgumentException("IP address must be specified");
             }
-            return new HttpPixooClient(ipAddress, port, connectTimeout, requestTimeout, autoSwitchToCustomChannel);
+            if (model == null) {
+                throw new IllegalArgumentException("Device model must not be null");
+            }
+            int targetPort = port != null ? port : model.defaultPort();
+            return new HttpPixooClient(model, ipAddress, targetPort, connectTimeout, requestTimeout, autoSwitchToCustomChannel);
         }
     }
 }

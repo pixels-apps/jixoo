@@ -17,10 +17,12 @@ package io.github.glaforge.jixoo.internal;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import io.github.glaforge.jixoo.api.*;
 import io.github.glaforge.jixoo.api.exception.PixooException;
+import io.github.glaforge.jixoo.api.exception.UnsupportedCommandException;
 import io.github.glaforge.jixoo.model.PixooAnimation;
 import io.github.glaforge.jixoo.model.PixooFrame;
 import io.github.glaforge.jixoo.model.command.PixooCommand;
@@ -43,8 +45,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -57,13 +61,21 @@ public class HttpPixooClient implements PixooClient {
     private static final AtomicInteger PIC_ID_GENERATOR = new AtomicInteger(new Random().nextInt(10000) + 1);
     private static final DateTimeFormatter UTC_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
+    // Reply of the Pixoo-64 II to a command it does not know
+    private static final String UNKNOWN_COMMAND_MESSAGE = "Only accept JSON parameters";
+    // Fields every reply may carry, whatever the command: a reply with nothing else holds no data
+    private static final Set<String> ENVELOPE_FIELDS = Set.of(
+            "error_code", "error_message",
+            "Command", "DeviceId", "PacketFlag", "DeviceType", "ReturnCode", "ReturnMessage", "WifiSingal");
+
+    private final PixooModel model;
     private final String targetUri;
     private final HttpClient httpClient;
     private final Duration requestTimeout;
     private final boolean autoSwitchToCustomChannel;
 
     /**
-     * Constructs a new HttpPixooClient.
+     * Constructs a new HttpPixooClient for an original Pixoo 64.
      *
      * @param ipAddress                 the IP address of the device
      * @param port                      the HTTP port to connect to
@@ -72,7 +84,22 @@ public class HttpPixooClient implements PixooClient {
      * @param autoSwitchToCustomChannel whether to automatically switch to the custom channel when sending content
      */
     public HttpPixooClient(String ipAddress, int port, Duration connectTimeout, Duration requestTimeout, boolean autoSwitchToCustomChannel) {
-        this.targetUri = "http://" + ipAddress + ":" + port + "/post";
+        this(PixooModel.PIXOO_64, ipAddress, port, connectTimeout, requestTimeout, autoSwitchToCustomChannel);
+    }
+
+    /**
+     * Constructs a new HttpPixooClient.
+     *
+     * @param model                     the device model, which sets the API path and response envelope
+     * @param ipAddress                 the IP address of the device
+     * @param port                      the HTTP port to connect to
+     * @param connectTimeout            the connection timeout duration
+     * @param requestTimeout            the request timeout duration
+     * @param autoSwitchToCustomChannel whether to automatically switch to the custom channel when sending content
+     */
+    public HttpPixooClient(PixooModel model, String ipAddress, int port, Duration connectTimeout, Duration requestTimeout, boolean autoSwitchToCustomChannel) {
+        this.model = model;
+        this.targetUri = "http://" + ipAddress + ":" + port + model.apiPath();
         this.httpClient = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(connectTimeout)
@@ -112,7 +139,24 @@ public class HttpPixooClient implements PixooClient {
                 throw new PixooException("Pixoo API HTTP Error: Status " + response.statusCode() + ", Body: " + response.body());
             }
 
-            return MAPPER.readValue(response.body(), responseType);
+            JsonNode reply = MAPPER.readTree(response.body());
+            PixooResponse status = MAPPER.treeToValue(reply, PixooResponse.class);
+            if (reply.has("ReturnCode") && UNKNOWN_COMMAND_MESSAGE.equals(status.errorMessage())) {
+                throw new UnsupportedCommandException(command.command(),
+                        "Command " + command.command() + " is not supported by this device (" + model + ")");
+            }
+            if (responseType == PixooResponse.class) {
+                return responseType.cast(status);
+            }
+            if (!status.isSuccess()) {
+                throw new PixooException("Command " + command.command() + " failed with error code "
+                        + status.errorCode() + (status.errorMessage() != null ? ": " + status.errorMessage() : ""));
+            }
+            if (reply.has("ReturnCode") && !hasPayload(reply)) {
+                throw new UnsupportedCommandException(command.command(),
+                        "Command " + command.command() + " returned no data on this device (" + model + ")");
+            }
+            return MAPPER.treeToValue(reply, responseType);
 
         } catch (PixooException e) {
             throw e;
@@ -123,6 +167,20 @@ public class HttpPixooClient implements PixooClient {
             String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             throw new PixooException("Failed to execute command " + command.command() + ": " + msg, e);
         }
+    }
+
+    private static boolean hasPayload(JsonNode reply) {
+        for (Iterator<String> names = reply.fieldNames(); names.hasNext(); ) {
+            if (!ENVELOPE_FIELDS.contains(names.next())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public PixooModel model() {
+        return model;
     }
 
     @Override
