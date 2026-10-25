@@ -62,6 +62,7 @@ public interface PixooClient extends AutoCloseable {
 
     /**
      * Creates a client connected to the given IP address with default settings.
+     * The device model is detected on the first command.
      *
      * @param ipAddress the IP address of the Pixoo64 device
      * @return a new instance of PixooClient
@@ -80,7 +81,8 @@ public interface PixooClient extends AutoCloseable {
     }
 
     /**
-     * Gets the device model this client talks to.
+     * Gets the device model this client talks to. A client built without an explicit model
+     * detects it on first use, so this may send a probe request to the device.
      *
      * @return the device model
      */
@@ -1008,7 +1010,7 @@ public interface PixooClient extends AutoCloseable {
      */
     class Builder {
         private String ipAddress;
-        private PixooModel model = PixooModel.PIXOO_64;
+        private PixooModel model;
         private Integer port;
         private Duration connectTimeout = Duration.ofSeconds(5);
         private Duration requestTimeout = Duration.ofSeconds(5);
@@ -1029,8 +1031,9 @@ public interface PixooClient extends AutoCloseable {
         }
 
         /**
-         * Sets the target device model (default is {@link PixooModel#PIXOO_64}),
-         * which selects the API path, the response envelope and the default port.
+         * Sets the target device model, which selects the API path, the response envelope and the
+         * default port. When no model is set (or {@code null}), the client detects it on its first
+         * command by probing the device.
          *
          * @param model the device model
          * @return this Builder
@@ -1094,7 +1097,7 @@ public interface PixooClient extends AutoCloseable {
                 throw new IllegalArgumentException("IP address must be specified");
             }
             if (model == null) {
-                throw new IllegalArgumentException("Device model must not be null");
+                return HttpPixooClient.detecting(ipAddress, port, connectTimeout, requestTimeout, autoSwitchToCustomChannel);
             }
             int targetPort = port != null ? port : model.defaultPort();
             return new HttpPixooClient(model, ipAddress, targetPort, connectTimeout, requestTimeout, autoSwitchToCustomChannel);

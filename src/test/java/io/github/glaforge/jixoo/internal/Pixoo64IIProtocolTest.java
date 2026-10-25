@@ -145,9 +145,38 @@ class Pixoo64IIProtocolTest {
     }
 
     @Test
+    void clientWithoutModelDetectsPixoo64II() {
+        PixooClient detecting = PixooClient.builder()
+                .ipAddress("127.0.0.1")
+                .port(server.getAddress().getPort())
+                .build();
+
+        assertEquals(10, detecting.getClockId());
+        assertEquals(PixooModel.PIXOO_64_II, detecting.model());
+        synchronized (receivedCommands) {
+            // One probe on /divoom_api (the /post probe gets a 404), then the command itself
+            assertEquals(List.of("Channel/GetIndex", "Channel/GetClockInfo"), receivedCommands);
+        }
+    }
+
+    @Test
+    void clientWithoutModelFailsClearlyWhenNothingAnswers() {
+        int closedPort = server.getAddress().getPort();
+        server.stop(0);
+        PixooClient detecting = PixooClient.builder()
+                .ipAddress("127.0.0.1")
+                .port(closedPort)
+                .build();
+
+        PixooException e = assertThrows(PixooException.class, () -> detecting.setBrightness(50));
+        assertTrue(e.getMessage().contains("No Pixoo device answered"), e.getMessage());
+    }
+
+    @Test
     void originalModelClientFailsOnPixoo64II() {
         // The original Pixoo 64 path (/post) does not exist on the Pixoo-64 II
         PixooClient original = PixooClient.builder()
+                .model(PixooModel.PIXOO_64)
                 .ipAddress("127.0.0.1")
                 .port(server.getAddress().getPort())
                 .build();

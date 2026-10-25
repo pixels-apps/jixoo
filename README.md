@@ -73,6 +73,12 @@ Set your target Pixoo 64 device IP address via command-line option `-H` / `--hos
 export PIXOO_HOST="192.168.1.100"
 ```
 
+The device model is detected automatically: the CLI probes the Pixoo 64 API (`:80/post`), then the Pixoo-64 II API (`:9000/divoom_api`). To skip detection, set it with `--model pixoo64|pixoo64-ii` (or the `PIXOO_MODEL` environment variable). `-p` / `--port` overrides the model's default port.
+
+```bash
+pixoo-cli --model pixoo64-ii -H 192.168.1.70 brightness 50
+```
+
 ### Subcommands Reference
 
 #### 1. Auto-Discover Devices
@@ -288,7 +294,7 @@ import java.nio.file.Path;
 
 public class PixooExample {
     public static void main(String[] args) {
-        // Connect to Pixoo 64 device
+        // Connect to a Pixoo 64 or Pixoo-64 II (the model is detected on the first command)
         try (PixooClient client = PixooClient.create("192.168.1.100")) {
             
             // 1. Sync real-time clock
@@ -346,9 +352,22 @@ import java.util.List;
 
 List<PixooDevice> devices = PixooDevice.discoverDevices(Duration.ofSeconds(3));
 for (PixooDevice device : devices) {
-    System.out.println("Discovered: " + device.deviceName() + " at " + device.ipAddress());
+    System.out.println("Discovered: " + device.deviceName() + " (" + device.model() + ") at " + device.ipAddress());
 }
 ```
+
+### Choosing the Device Model
+
+`PixooClient.create(ip)` and a builder without a model detect the model on the first command. Set it explicitly to skip the probe:
+
+```java
+PixooClient client = PixooClient.builder()
+        .ipAddress("192.168.1.70")
+        .model(PixooModel.PIXOO_64_II) // port 9000, /divoom_api
+        .build();
+```
+
+Commands the device does not support (see [SPECIFICATION.md §10](SPECIFICATION.md)) throw `UnsupportedCommandException`.
 
 ---
 

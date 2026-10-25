@@ -23,6 +23,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import io.github.glaforge.jixoo.api.*;
 import io.github.glaforge.jixoo.api.exception.PixooException;
 import io.github.glaforge.jixoo.api.exception.UnsupportedCommandException;
+import io.github.glaforge.jixoo.discovery.PixooModelProbe;
 import io.github.glaforge.jixoo.model.PixooAnimation;
 import io.github.glaforge.jixoo.model.PixooFrame;
 import io.github.glaforge.jixoo.model.command.PixooCommand;
@@ -47,6 +48,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -68,8 +70,12 @@ public class HttpPixooClient implements PixooClient {
             "error_code", "error_message",
             "Command", "DeviceId", "PacketFlag", "DeviceType", "ReturnCode", "ReturnMessage", "WifiSingal");
 
-    private final PixooModel model;
-    private final String targetUri;
+    private final String ipAddress;
+    private final Integer port;
+    private final Duration connectTimeout;
+    // Resolved on first use when the model is detected
+    private volatile PixooModel model;
+    private volatile String targetUri;
     private final HttpClient httpClient;
     private final Duration requestTimeout;
     private final boolean autoSwitchToCustomChannel;
@@ -98,8 +104,30 @@ public class HttpPixooClient implements PixooClient {
      * @param autoSwitchToCustomChannel whether to automatically switch to the custom channel when sending content
      */
     public HttpPixooClient(PixooModel model, String ipAddress, int port, Duration connectTimeout, Duration requestTimeout, boolean autoSwitchToCustomChannel) {
-        this.model = model;
-        this.targetUri = "http://" + ipAddress + ":" + port + model.apiPath();
+        this(Objects.requireNonNull(model, "model"), ipAddress, (Integer) port, connectTimeout, requestTimeout, autoSwitchToCustomChannel);
+    }
+
+    /**
+     * Creates a client that detects the device model on first use (see {@link PixooModelProbe}).
+     *
+     * @param ipAddress                 the IP address of the device
+     * @param port                      the HTTP port, or {@code null} to try each model's default port
+     * @param connectTimeout            the connection timeout duration
+     * @param requestTimeout            the request timeout duration
+     * @param autoSwitchToCustomChannel whether to automatically switch to the custom channel when sending content
+     * @return a client whose model is detected on the first command
+     */
+    public static HttpPixooClient detecting(String ipAddress, Integer port, Duration connectTimeout, Duration requestTimeout, boolean autoSwitchToCustomChannel) {
+        return new HttpPixooClient(null, ipAddress, port, connectTimeout, requestTimeout, autoSwitchToCustomChannel);
+    }
+
+    private HttpPixooClient(PixooModel model, String ipAddress, Integer port, Duration connectTimeout, Duration requestTimeout, boolean autoSwitchToCustomChannel) {
+        this.ipAddress = ipAddress;
+        this.port = port;
+        this.connectTimeout = connectTimeout;
+        if (model != null) {
+            useModel(model, port != null ? port : model.defaultPort());
+        }
         this.httpClient = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(connectTimeout)
@@ -123,11 +151,12 @@ public class HttpPixooClient implements PixooClient {
      */
     public <T> T executeCommand(PixooCommand command, Class<T> responseType) {
         try {
+            String uri = endpointUri();
             String jsonBody = MAPPER.writeValueAsString(command);
-            log.debug("Sending JSON command to {}: {}", targetUri, jsonBody);
+            log.debug("Sending JSON command to {}: {}", uri, jsonBody);
 
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(targetUri))
+                    .uri(URI.create(uri))
                     .timeout(requestTimeout)
                     .header("Content-Type", "application/json; charset=utf-8")
                     .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
@@ -143,7 +172,7 @@ public class HttpPixooClient implements PixooClient {
             PixooResponse status = MAPPER.treeToValue(reply, PixooResponse.class);
             if (reply.has("ReturnCode") && UNKNOWN_COMMAND_MESSAGE.equals(status.errorMessage())) {
                 throw new UnsupportedCommandException(command.command(),
-                        "Command " + command.command() + " is not supported by this device (" + model + ")");
+                        "Command " + command.command() + " is not supported by this device (" + model() + ")");
             }
             if (responseType == PixooResponse.class) {
                 return responseType.cast(status);
@@ -154,7 +183,7 @@ public class HttpPixooClient implements PixooClient {
             }
             if (reply.has("ReturnCode") && !hasPayload(reply)) {
                 throw new UnsupportedCommandException(command.command(),
-                        "Command " + command.command() + " returned no data on this device (" + model + ")");
+                        "Command " + command.command() + " returned no data on this device (" + model() + ")");
             }
             return MAPPER.treeToValue(reply, responseType);
 
@@ -180,7 +209,29 @@ public class HttpPixooClient implements PixooClient {
 
     @Override
     public PixooModel model() {
+        endpointUri();
         return model;
+    }
+
+    private String endpointUri() {
+        if (targetUri == null) {
+            synchronized (this) {
+                if (targetUri == null) {
+                    PixooModelProbe.Detection detection = PixooModelProbe.detect(ipAddress, port, connectTimeout)
+                            .orElseThrow(() -> new PixooException("No Pixoo device answered at " + ipAddress
+                                    + (port != null ? ":" + port : " (tried ports 80 and 9000)")
+                                    + "; check the address, or set the model explicitly"));
+                    log.debug("Detected {} at {}:{}", detection.model(), ipAddress, detection.port());
+                    useModel(detection.model(), detection.port());
+                }
+            }
+        }
+        return targetUri;
+    }
+
+    private void useModel(PixooModel model, int port) {
+        this.model = model;
+        this.targetUri = "http://" + ipAddress + ":" + port + model.apiPath();
     }
 
     @Override
