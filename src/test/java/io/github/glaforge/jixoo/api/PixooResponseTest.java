@@ -65,4 +65,13 @@ class PixooResponseTest {
         assertEquals(9000, PixooModel.PIXOO_64_II.defaultPort());
         assertEquals("/divoom_api", PixooModel.PIXOO_64_II.apiPath());
     }
+
+    @Test
+    void stillImagesPlayShortOnlyOnThePixoo64II() {
+        assertEquals(60000, PixooModel.PIXOO_64.stillFrameDelayMs(60000));
+        assertEquals(1000, PixooModel.PIXOO_64_II.stillFrameDelayMs(60000));
+        assertTrue(PixooModel.PIXOO_64.unsupportedReason("Channel/SetStartupChannel").isEmpty());
+        assertTrue(PixooModel.PIXOO_64_II.unsupportedReason("Channel/SetStartupChannel").isPresent());
+        assertTrue(PixooModel.PIXOO_64_II.unsupportedReason("Channel/SetBrightness").isEmpty());
+    }
 }

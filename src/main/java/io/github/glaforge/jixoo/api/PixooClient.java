@@ -675,6 +675,9 @@ public interface PixooClient extends AutoCloseable {
      * Because the ESP32 has limited memory and a minimal TLS stack, high-resolution GIFs (such as &gt;64x64)
      * or complex HTTPS endpoints will cause the device to crash and reboot.
      * For reliable playback, prefer {@link #sendGif(URI)} or {@link #sendGifUrl(String)}.
+     * <p>
+     * The Pixoo-64 II downloads the URL but never displays it: on that model, the GIF is
+     * downloaded and streamed by {@link #sendGifUrl(String)} instead.
      *
      * @param gifUrl the HTTP/HTTPS URL of the GIF
      * @return the device's response
@@ -734,6 +737,7 @@ public interface PixooClient extends AutoCloseable {
      * Checks if the screen matrix is currently turned on.
      *
      * @return true if the screen is on, false if off / in standby
+     * @throws io.github.glaforge.jixoo.api.exception.PixooException if the device cannot be reached
      */
     boolean isScreenOn();
 

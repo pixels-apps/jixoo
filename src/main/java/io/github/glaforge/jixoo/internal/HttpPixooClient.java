@@ -38,6 +38,7 @@ import io.github.glaforge.jixoo.model.tool.TimerStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -48,10 +49,13 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
 import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * HTTP-based implementation of {@link PixooClient}.
@@ -77,6 +81,10 @@ public class HttpPixooClient implements PixooClient {
     private volatile PixooModel model;
     private volatile String targetUri;
     private final HttpClient httpClient;
+    // The device serves one request at a time and garbles back-to-back requests: send them one by one, spaced out
+    private static final long MIN_REQUEST_INTERVAL_NANOS = Duration.ofMillis(30).toNanos();
+    private final ReentrantLock requestLock = new ReentrantLock(true);
+    private long lastRequestEndNanos;
     private final Duration requestTimeout;
     private final boolean autoSwitchToCustomChannel;
 
@@ -152,6 +160,11 @@ public class HttpPixooClient implements PixooClient {
     public <T> T executeCommand(PixooCommand command, Class<T> responseType) {
         try {
             String uri = endpointUri();
+            Optional<String> unsupported = model().unsupportedReason(command.command());
+            if (unsupported.isPresent()) {
+                throw new UnsupportedCommandException(command.command(),
+                        "Command " + command.command() + " is not supported by this device (" + model() + "): " + unsupported.get());
+            }
             String jsonBody = MAPPER.writeValueAsString(command);
             log.debug("Sending JSON command to {}: {}", uri, jsonBody);
 
@@ -162,7 +175,7 @@ public class HttpPixooClient implements PixooClient {
                     .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
                     .build();
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = send(request);
 
             if (response.statusCode() != 200) {
                 throw new PixooException("Pixoo API HTTP Error: Status " + response.statusCode() + ", Body: " + response.body());
@@ -195,6 +208,23 @@ public class HttpPixooClient implements PixooClient {
         } catch (Exception e) {
             String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             throw new PixooException("Failed to execute command " + command.command() + ": " + msg, e);
+        }
+    }
+
+    private HttpResponse<String> send(HttpRequest request) throws IOException, InterruptedException {
+        requestLock.lock();
+        try {
+            long wait = lastRequestEndNanos + MIN_REQUEST_INTERVAL_NANOS - System.nanoTime();
+            if (lastRequestEndNanos != 0 && wait > 0) {
+                TimeUnit.NANOSECONDS.sleep(wait);
+            }
+            try {
+                return httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            } finally {
+                lastRequestEndNanos = System.nanoTime();
+            }
+        } finally {
+            requestLock.unlock();
         }
     }
 
@@ -256,19 +286,20 @@ public class HttpPixooClient implements PixooClient {
 
     @Override
     public boolean isScreenOn() {
-        try {
-            ScreenStateResponse resp = executeCommand(new PixooCommand.GetScreenStateCommand(), ScreenStateResponse.class);
-            return resp.onOff() == null || resp.onOff() == 1;
-        } catch (Exception e) {
-            log.warn("Failed to get screen state: {}", e.getMessage());
-            return true;
-        }
+        ScreenStateResponse resp = executeCommand(new PixooCommand.GetScreenStateCommand(), ScreenStateResponse.class);
+        return resp.onOff() == null || resp.onOff() == 1;
     }
 
     private int prepareCustomChannel() {
         if (!autoSwitchToCustomChannel) return -1;
 
-        boolean wasScreenOn = isScreenOn();
+        boolean wasScreenOn;
+        try {
+            wasScreenOn = isScreenOn();
+        } catch (PixooException e) {
+            log.warn("Failed to get screen state, assuming it is on: {}", e.getMessage());
+            wasScreenOn = true;
+        }
         if (!wasScreenOn) {
             setScreenState(true);
             try { Thread.sleep(250); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -289,6 +320,10 @@ public class HttpPixooClient implements PixooClient {
         int totalFrames = animation.frameCount();
         int picId = PIC_ID_GENERATOR.incrementAndGet();
         PixooResponse lastResponse = new PixooResponse(0);
+        if (totalFrames > 1 && model() == PixooModel.PIXOO_64_II) {
+            // The Pixoo-64 II takes ~1.5 s to acknowledge each frame
+            log.info("Uploading {} frames to the Pixoo-64 II, about {} s...", totalFrames, Math.round(totalFrames * 1.5));
+        }
 
         for (int i = 0; i < totalFrames; i++) {
             PixooFrame frame = animation.frames().get(i);
@@ -298,7 +333,7 @@ public class HttpPixooClient implements PixooClient {
                     totalFrames,
                     i,
                     picId,
-                    frame.delayMs(),
+                    totalFrames == 1 ? model().stillFrameDelayMs(frame.delayMs()) : frame.delayMs(),
                     base64Data
             );
 
@@ -307,7 +342,7 @@ public class HttpPixooClient implements PixooClient {
                 log.warn("Frame {} of {} failed with error code {}", i, totalFrames, lastResponse.errorCode());
                 break;
             }
-            try { Thread.sleep(30); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            log.debug("Frame {} of {} sent", i + 1, totalFrames);
         }
 
         try { Thread.sleep(250); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -317,6 +352,11 @@ public class HttpPixooClient implements PixooClient {
 
     @Override
     public PixooResponse sendRemoteGifUrl(String gifUrl) {
+        if (model() == PixooModel.PIXOO_64_II) {
+            // The Pixoo-64 II downloads the URL but never displays it: decode it here and stream the frames instead
+            log.info("The Pixoo-64 II cannot play remote GIF URLs itself; downloading and streaming {} instead", gifUrl);
+            return sendGifUrl(gifUrl);
+        }
         int originalState = prepareCustomChannel();
         PixooResponse response = executeCommand(new PixooCommand.RemoteGifCommand(gifUrl));
         try { Thread.sleep(250); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }

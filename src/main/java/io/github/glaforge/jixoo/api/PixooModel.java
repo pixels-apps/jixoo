@@ -15,6 +15,9 @@
  */
 package io.github.glaforge.jixoo.api;
 
+import java.util.Map;
+import java.util.Optional;
+
 /**
  * Divoom device models supported by the local HTTP API, with their transport endpoint.
  * <p>
@@ -25,19 +28,30 @@ package io.github.glaforge.jixoo.api;
  *     <li>{@link #PIXOO_64_II}: {@code POST http://<ip>:9000/divoom_api} (port 80 is closed),
  *     replies with {@code ReturnCode} / {@code ReturnMessage}.</li>
  * </ul>
+ * The model also carries the device's quirks: how long a still image must play, and which
+ * commands it acknowledges without honoring them (see SPECIFICATION.md §10).
  */
 public enum PixooModel {
     /** Original Divoom Pixoo 64. */
-    PIXOO_64(80, "/post"),
-    /** Divoom Pixoo-64 II. */
-    PIXOO_64_II(9000, "/divoom_api");
+    PIXOO_64(80, "/post", 0, Map.of()),
+    /**
+     * Divoom Pixoo-64 II. A still image is played for its {@code PicSpeed} before the next upload
+     * shows: a short duration lets each image replace the previous one at once (the last one stays).
+     */
+    PIXOO_64_II(9000, "/divoom_api", 1000, Map.of(
+            "Channel/SetStartupChannel", "the device acknowledges it, but the startup channel reverts within seconds",
+            "Memorial/Del", "the device stops answering after this command"));
 
     private final int defaultPort;
     private final String apiPath;
+    private final int stillFrameDelayMs;
+    private final Map<String, String> unsupportedCommands;
 
-    PixooModel(int defaultPort, String apiPath) {
+    PixooModel(int defaultPort, String apiPath, int stillFrameDelayMs, Map<String, String> unsupportedCommands) {
         this.defaultPort = defaultPort;
         this.apiPath = apiPath;
+        this.stillFrameDelayMs = stillFrameDelayMs;
+        this.unsupportedCommands = unsupportedCommands;
     }
 
     /**
@@ -56,5 +70,25 @@ public enum PixooModel {
      */
     public String apiPath() {
         return apiPath;
+    }
+
+    /**
+     * Gets the display duration to send for a still image (a one-frame animation).
+     *
+     * @param requestedMs the duration requested by the caller
+     * @return the duration to send to this model
+     */
+    public int stillFrameDelayMs(int requestedMs) {
+        return stillFrameDelayMs > 0 ? stillFrameDelayMs : requestedMs;
+    }
+
+    /**
+     * Tells why this model cannot honor a command it would otherwise accept.
+     *
+     * @param command the command name (e.g. {@code Channel/SetStartupChannel})
+     * @return the reason, or empty if the command is not known to be unsupported
+     */
+    public Optional<String> unsupportedReason(String command) {
+        return Optional.ofNullable(unsupportedCommands.get(command));
     }
 }

@@ -272,7 +272,8 @@ class HttpPixooClientIntegrationTest {
     }
 
     @ParameterizedTest
-    @EnumSource(PixooModel.class)
+    // Rejected before sending on the Pixoo-64 II: see Pixoo64IIProtocolTest
+    @EnumSource(value = PixooModel.class, names = "PIXOO_64")
     void testStartupChannelAndClockSelection(PixooModel model) {
         PixooClient client = PixooClient.builder()
                 .ipAddress("127.0.0.1")
@@ -420,7 +421,8 @@ class HttpPixooClientIntegrationTest {
     }
 
     @ParameterizedTest
-    @EnumSource(PixooModel.class)
+    // Rejected before sending on the Pixoo-64 II: see Pixoo64IIProtocolTest
+    @EnumSource(value = PixooModel.class, names = "PIXOO_64")
     void testMemorialManagement(PixooModel model) {
         PixooClient client = PixooClient.builder()
                 .ipAddress("127.0.0.1")

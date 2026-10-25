@@ -24,7 +24,10 @@ import io.github.glaforge.jixoo.api.PixooModel;
 import io.github.glaforge.jixoo.api.PixooResponse;
 import io.github.glaforge.jixoo.api.exception.PixooException;
 import io.github.glaforge.jixoo.api.exception.UnsupportedCommandException;
+import io.github.glaforge.jixoo.image.GifEncoder;
+import io.github.glaforge.jixoo.model.PixooAnimation;
 import io.github.glaforge.jixoo.model.PixooFrame;
+import io.github.glaforge.jixoo.model.RawRgbBuffer;
 import io.github.glaforge.jixoo.model.tool.TimerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -54,6 +57,8 @@ class Pixoo64IIProtocolTest {
     private JsonNode replies;
     private PixooClient client;
     private final List<String> receivedCommands = new ArrayList<>();
+    private final List<JsonNode> receivedBodies = new ArrayList<>();
+    private final List<Long> arrivalNanos = new ArrayList<>();
 
     @BeforeEach
     void setUp() throws IOException {
@@ -62,9 +67,13 @@ class Pixoo64IIProtocolTest {
         }
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/divoom_api", exchange -> {
-            String command = MAPPER.readTree(exchange.getRequestBody()).path("Command").asText();
+            long arrival = System.nanoTime();
+            JsonNode request = MAPPER.readTree(exchange.getRequestBody());
+            String command = request.path("Command").asText();
             synchronized (receivedCommands) {
                 receivedCommands.add(command);
+                receivedBodies.add(request);
+                arrivalNanos.add(arrival);
             }
             JsonNode reply = replies.get(command);
             byte[] body = (reply != null ? reply.toString() : UNKNOWN_COMMAND).getBytes(StandardCharsets.UTF_8);
@@ -72,6 +81,17 @@ class Pixoo64IIProtocolTest {
             exchange.sendResponseHeaders(200, body.length);
             try (OutputStream os = exchange.getResponseBody()) {
                 os.write(body);
+            }
+        });
+        // A small animated GIF for the remote-URL fallback
+        byte[] gif = GifEncoder.encode(new PixooAnimation(List.of(
+                new PixooFrame(RawRgbBuffer.fromRgb(255, 0, 0), 200),
+                new PixooFrame(RawRgbBuffer.fromRgb(0, 0, 255), 200))));
+        server.createContext("/anim.gif", exchange -> {
+            exchange.getResponseHeaders().set("Content-Type", "image/gif");
+            exchange.sendResponseHeaders(200, gif.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(gif);
             }
         });
         server.start();
@@ -183,5 +203,78 @@ class Pixoo64IIProtocolTest {
 
         PixooException e = assertThrows(PixooException.class, () -> original.setBrightness(50));
         assertTrue(e.getMessage().contains("404"), e.getMessage());
+    }
+
+    @Test
+    void stillImagesUseShortDurationSoTheyDoNotQueue() {
+        client.sendColor(255, 0, 0); // requests 60 s, the Pixoo 64 default for solid colors
+
+        synchronized (receivedCommands) {
+            JsonNode frame = receivedBodies.get(receivedCommands.indexOf("Draw/SendHttpGif"));
+            assertEquals(1000, frame.path("PicSpeed").asInt());
+        }
+    }
+
+    @Test
+    void animationsKeepTheirFrameDurations() {
+        client.sendAnimation(new PixooAnimation(List.of(
+                new PixooFrame(new byte[64 * 64 * 3], 120),
+                new PixooFrame(new byte[64 * 64 * 3], 250))));
+
+        synchronized (receivedCommands) {
+            List<Integer> speeds = receivedBodies.stream()
+                    .filter(body -> body.path("Command").asText().equals("Draw/SendHttpGif"))
+                    .map(body -> body.path("PicSpeed").asInt())
+                    .toList();
+            assertEquals(List.of(120, 250), speeds);
+        }
+    }
+
+    @Test
+    void commandsTheDeviceDoesNotHonorAreRejectedWithoutBeingSent() {
+        UnsupportedCommandException e = assertThrows(UnsupportedCommandException.class,
+                () -> client.setStartupChannel(PixooChannel.CLOCK));
+        assertEquals("Channel/SetStartupChannel", e.command());
+        assertTrue(e.getMessage().contains("reverts"), e.getMessage());
+
+        assertThrows(UnsupportedCommandException.class, () -> client.deleteMemorial(1));
+
+        synchronized (receivedCommands) {
+            assertTrue(receivedCommands.isEmpty(), receivedCommands.toString());
+        }
+    }
+
+    @Test
+    void remoteGifUrlIsStreamedByTheClient() {
+        String url = "http://127.0.0.1:" + server.getAddress().getPort() + "/anim.gif";
+
+        PixooResponse response = client.sendRemoteGifUrl(url);
+
+        assertTrue(response.isSuccess());
+        synchronized (receivedCommands) {
+            assertFalse(receivedCommands.contains("Device/PlayTFGif"));
+            assertEquals(List.of("Draw/ResetHttpGifId", "Draw/SendHttpGif", "Draw/SendHttpGif"), receivedCommands);
+        }
+    }
+
+    @Test
+    void requestsAreSpacedOut() {
+        for (int i = 0; i < 4; i++) {
+            client.setBrightness(50);
+        }
+
+        synchronized (receivedCommands) {
+            for (int i = 1; i < arrivalNanos.size(); i++) {
+                long gapMs = (arrivalNanos.get(i) - arrivalNanos.get(i - 1)) / 1_000_000;
+                assertTrue(gapMs >= 30, "requests " + (i - 1) + " and " + i + " were " + gapMs + " ms apart");
+            }
+        }
+    }
+
+    @Test
+    void screenStateFailsWhenTheDeviceIsUnreachable() {
+        server.stop(0);
+
+        assertThrows(PixooException.class, () -> client.isScreenOn());
     }
 }
